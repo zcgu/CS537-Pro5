@@ -6,7 +6,7 @@
 //
 // Disk layout is: superblock, inodes, block in-use bitmap, data blocks.
 //
-// This file contains the low-level file system manipulation 
+// This file contains the low-level file system manipulation
 // routines.  The (higher-level) system call implementations
 // are in sysfile.c.
 
@@ -29,7 +29,7 @@ static void
 readsb(int dev, struct superblock *sb)
 {
   struct buf *bp;
-  
+
   bp = bread(dev, 1);
   memmove(sb, bp->data, sizeof(*sb));
   brelse(bp);
@@ -40,14 +40,14 @@ static void
 bzero(int dev, int bno)
 {
   struct buf *bp;
-  
+
   bp = bread(dev, bno);
   memset(bp->data, 0, BSIZE);
   bwrite(bp);
   brelse(bp);
 }
 
-// Blocks. 
+// Blocks.
 
 // Allocate a disk block.
 static uint
@@ -107,7 +107,7 @@ bfree(int dev, uint b)
 // the superblock.  The kernel keeps a cache of the in-use
 // on-disk structures to provide a place for synchronizing access
 // to inodes shared between multiple processes.
-// 
+//
 // ip->ref counts the number of pointer references to this cached
 // inode; references are typically kept in struct file and in proc->cwd.
 // When ip->ref falls to zero, the inode is no longer cached.
@@ -116,22 +116,22 @@ bfree(int dev, uint b)
 // Processes are only allowed to read and write inode
 // metadata and contents when holding the inode's lock,
 // represented by the I_BUSY flag in the in-memory copy.
-// Because inode locks are held during disk accesses, 
+// Because inode locks are held during disk accesses,
 // they are implemented using a flag rather than with
 // spin locks.  Callers are responsible for locking
 // inodes before passing them to routines in this file; leaving
 // this responsibility with the caller makes it possible for them
 // to create arbitrarily-sized atomic operations.
 //
-// To give maximum control over locking to the callers, 
-// the routines in this file that return inode pointers 
+// To give maximum control over locking to the callers,
+// the routines in this file that return inode pointers
 // return pointers to *unlocked* inodes.  It is the callers'
 // responsibility to lock them before using them.  A non-zero
 // ip->ref keeps these unlocked inodes in the cache.
 
 struct {
-  struct spinlock lock;
-  struct inode inode[NINODE];
+    struct spinlock lock;
+    struct inode inode[NINODE];
 } icache;
 
 void
@@ -311,7 +311,7 @@ iunlockput(struct inode *ip)
 //
 // The contents (data) associated with each inode is stored
 // in a sequence of blocks on the disk.  The first NDIRECT blocks
-// are listed in ip->addrs[].  The next NINDIRECT blocks are 
+// are listed in ip->addrs[].  The next NINDIRECT blocks are
 // listed in the block ip->addrs[NDIRECT].
 
 // Return the disk block address of the nth block in inode ip.
@@ -324,7 +324,11 @@ bmap(struct inode *ip, uint bn)
 
   if(bn < NDIRECT){
     if((addr = ip->addrs[bn]) == 0)
+    {
       ip->addrs[bn] = addr = balloc(ip->dev);
+      if (ip->type == T_CHECKED && addr > 0x00ffffff)
+        panic("bmap:block full1");
+    }
     return addr;
   }
   bn -= NDIRECT;
@@ -332,11 +336,17 @@ bmap(struct inode *ip, uint bn)
   if(bn < NINDIRECT){
     // Load indirect block, allocating if necessary.
     if((addr = ip->addrs[NDIRECT]) == 0)
+    {
       ip->addrs[NDIRECT] = addr = balloc(ip->dev);
+      if (ip->type == T_CHECKED && addr > 0x00ffffff)
+        panic("bmap:block full2");
+    }
     bp = bread(ip->dev, addr);
     a = (uint*)bp->data;
     if((addr = a[bn]) == 0){
       a[bn] = addr = balloc(ip->dev);
+      if(ip->type == T_CHECKED && addr > 0x00ffffff)
+        panic("bmap:block full3");
       bwrite(bp);
     }
     brelse(bp);
@@ -362,7 +372,7 @@ itrunc(struct inode *ip)
       ip->addrs[i] = 0;
     }
   }
-  
+
   if(ip->addrs[NDIRECT]){
     bp = bread(ip->dev, ip->addrs[NDIRECT]);
     a = (uint*)bp->data;
@@ -388,7 +398,79 @@ stati(struct inode *ip, struct stat *st)
   st->type = ip->type;
   st->nlink = ip->nlink;
   st->size = ip->size;
+  if(ip->type == T_CHECKED){
+    st->checksum = 0;
+    int i;
+    for(i=0; i<NDIRECT;i++){
+      st->checksum ^= ip->addrs[i]>>24;
+    }
+    if(i==NDIRECT) {
+      struct buf *bp;
+      uint *a;
+      bp = bread(ip->dev, ip->addrs[NDIRECT]);
+      a = (uint*)bp->data;
+      for(i=0;i<NINDIRECT; i++)
+      {
+        st->checksum ^= a[i]>>24;
+      }
+      brelse(bp);
+    }
+  }
 }
+
+
+uint
+checksum(uchar *addr, uint m){
+  uint checksum = 0;
+  int i =0;
+  for(i =0; i < m; i++)
+    checksum ^= addr[i];
+  return checksum;
+}
+
+uchar
+getchecksum(struct inode *ip, uint bn)
+{
+  uint *a;
+  uchar checksum = 0x00;
+  struct buf *bp;
+  if(bn<NDIRECT)
+    checksum = ip->addrs[bn]>>24;
+  else{
+    bn -=NDIRECT;
+    bp = bread(ip->dev, ip->addrs[NDIRECT]);
+    a = (uint*)bp->data;
+    checksum = a[bn]>>24;
+    brelse(bp);
+  }
+
+  return checksum;
+}
+
+
+int
+updatechecksum(struct inode *ip, uint bn, uint checksum)
+{
+  uint *a;
+  struct buf *bp;
+  checksum = checksum<<24;
+  if(bn < NDIRECT){
+    ip->addrs[bn] = (ip->addrs[bn]&0x00ffffff)|checksum;
+    return 0;
+  }
+  bn -= NDIRECT;
+
+  if(bn < NINDIRECT){
+    bp = bread(ip->dev, ip->addrs[NDIRECT]);
+    a = (uint*)bp->data;
+    a[bn] = (a[bn]&0x00ffffff)|checksum;
+    bwrite(bp);
+    brelse(bp);
+    return 0;
+  }
+  return -1;
+}
+
 
 // Read data from inode.
 int
@@ -409,9 +491,15 @@ readi(struct inode *ip, char *dst, uint off, uint n)
     n = ip->size - off;
 
   for(tot=0; tot<n; tot+=m, off+=m, dst+=m){
-    bp = bread(ip->dev, bmap(ip, off/BSIZE));
+    if(ip->type == T_CHECKED)
+      bp = bread(ip->dev, bmap(ip, off/BSIZE) & 0x00ffffff);
+    else  //TODO:?
+      bp = bread(ip->dev, bmap(ip, off/BSIZE));
     m = min(n - tot, BSIZE - off%BSIZE);
     memmove(dst, bp->data + off%BSIZE, m);
+    if(ip->type == T_CHECKED)
+    if(checksum(bp->data, BSIZE) != getchecksum(ip, off/BSIZE))
+      return -1;
     brelse(bp);
   }
   return n;
@@ -436,10 +524,15 @@ writei(struct inode *ip, char *src, uint off, uint n)
     n = MAXFILE*BSIZE - off;
 
   for(tot=0; tot<n; tot+=m, off+=m, src+=m){
-    bp = bread(ip->dev, bmap(ip, off/BSIZE));
+    if(ip->type == T_CHECKED)
+      bp = bread(ip->dev, bmap(ip, off/BSIZE) & 0x00ffffff);
+    else
+      bp = bread(ip->dev, bmap(ip, off/BSIZE));
     m = min(n - tot, BSIZE - off%BSIZE);
     memmove(bp->data + off%BSIZE, src, m);
     bwrite(bp);
+    if(ip->type == T_CHECKED)
+      updatechecksum(ip, off/BSIZE, checksum(bp->data,BSIZE));
     brelse(bp);
   }
 
@@ -472,7 +565,7 @@ dirlookup(struct inode *dp, char *name, uint *poff)
     panic("dirlookup not DIR");
 
   for(off = 0; off < dp->size; off += BSIZE){
-    bp = bread(dp->dev, bmap(dp, off / BSIZE));
+    bp = bread(dp->dev, bmap(dp, off / BSIZE));//TODO:?
     for(de = (struct dirent*)bp->data;
         de < (struct dirent*)(bp->data + BSIZE);
         de++){
@@ -518,7 +611,7 @@ dirlink(struct inode *dp, char *name, uint inum)
   de.inum = inum;
   if(writei(dp, (char*)&de, off, sizeof(de)) != sizeof(de))
     panic("dirlink");
-  
+
   return 0;
 }
 
