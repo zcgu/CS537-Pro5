@@ -1,0 +1,22 @@
+Author:
+Name         CS login    wisc login
+-----------------------------------
+Shuo Han     shan        shan87
+Zhicheng Gu  zhichenggu  zgu58
+
+- Set O_CHECKED to 0x400 in fcntl.h.
+- Set T_CHECKED to 4 in stat.h.
+- Add checksum to stat struct in stat.h.
+- In fs.c, modify stati() to return the checksum of the file.
+  The checksum is equal to XOR of checksum value in all of the blocks.
+  If the file uses indirectory, we should also calculate all of the indirect blocks.
+- In fs.c, add getchecksum() to get the checksum of a block.
+- In fs.c, add setchecksum() to set the checksum of a block.
+- In fs.c, modify readi() to check the type.
+  If this is a checked file, the address need change after bmap().
+  Also, when reading a block, check whether the checksum of data match the exists checksum.
+- In fs.c, modify writei() to check the type and change the address.
+  Set the checksum after write blocks.
+- Write filestat to print type, size and checksum of a checked file.
+  If input is not a checked file, print error info.
+ 
